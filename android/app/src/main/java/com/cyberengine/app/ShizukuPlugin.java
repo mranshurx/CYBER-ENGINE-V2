@@ -2,6 +2,7 @@ package com.cyberengine.app;
 
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
@@ -26,6 +27,8 @@ import java.io.FileOutputStream;
 import java.io.InputStreamReader;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
+import java.util.Set;
 
 import rikka.shizuku.Shizuku;
 
@@ -149,29 +152,26 @@ public class ShizukuPlugin extends Plugin {
 
     @PluginMethod
     public void requestPermission(PluginCall call) {
+        if (!isShizukuRunning()) {
+            call.reject("Shizuku is not running. Please open the Shizuku app and start the service first.");
+            return;
+        }
+
         if (hasShizukuPermission()) {
             JSObject ret = new JSObject();
             ret.put("granted", true);
-            ret.put("message", "Permission already granted in Shizuku");
+            ret.put("message", "Permission already granted");
             call.resolve(ret);
             return;
         }
 
-        pendingPermissionCall = call;
-        getActivity().runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    Shizuku.requestPermission(SHIZUKU_REQ_CODE);
-                } catch (Throwable t) {
-                    Log.e(TAG, "Shizuku requestPermission failed: " + t.getMessage(), t);
-                    if (pendingPermissionCall != null) {
-                        pendingPermissionCall.reject("Shizuku service is not active (" + t.getMessage() + "). Please open Shizuku and start it via Wireless Debugging or Root.");
-                        pendingPermissionCall = null;
-                    }
-                }
-            }
-        });
+        try {
+            pendingPermissionCall = call;
+            Shizuku.requestPermission(SHIZUKU_REQ_CODE);
+        } catch (Throwable t) {
+            pendingPermissionCall = null;
+            call.reject("Failed to request Shizuku permission: " + t.getMessage());
+        }
     }
 
     @PluginMethod
@@ -188,6 +188,15 @@ public class ShizukuPlugin extends Plugin {
             call.reject("No files provided to paste");
             return;
         }
+
+        // Record pasted files for exit cleanup
+        Set<String> fileNames = new HashSet<>();
+        for (int i = 0; i < filesArray.length(); i++) {
+            try {
+                fileNames.add(filesArray.getJSONObject(i).getString("name"));
+            } catch (Throwable ignored) {}
+        }
+        savePastedFiles(getContext(), targetDir, fileNames);
 
         boolean shizukuReady = isShizukuRunning() && hasShizukuPermission();
         boolean rootReady = !shizukuReady && isRootAvailable();
@@ -398,12 +407,111 @@ public class ShizukuPlugin extends Plugin {
         }
     }
 
+    public static void savePastedFiles(Context context, String targetDir, Set<String> fileNames) {
+        if (context == null) return;
+        try {
+            SharedPreferences sp = context.getSharedPreferences("CYBER_ENGINE_PREFS", Context.MODE_PRIVATE);
+            sp.edit()
+                .putString("last_target_dir", targetDir)
+                .putStringSet("last_pasted_files", fileNames)
+                .apply();
+            Log.d(TAG, "Saved " + fileNames.size() + " files to CYBER_ENGINE_PREFS for exit cleanup.");
+        } catch (Throwable t) {
+            Log.w(TAG, "Failed to save pasted files list: " + t.getMessage());
+        }
+    }
+
+    public static void performCleanup(Context context) {
+        if (context == null) return;
+        try {
+            SharedPreferences sp = context.getSharedPreferences("CYBER_ENGINE_PREFS", Context.MODE_PRIVATE);
+            String targetDir = sp.getString("last_target_dir", null);
+            Set<String> fileNames = sp.getStringSet("last_pasted_files", null);
+
+            if (targetDir == null || fileNames == null || fileNames.isEmpty()) {
+                return;
+            }
+
+            Log.d(TAG, "Deleting " + fileNames.size() + " pasted files on app exit from: " + targetDir);
+
+            boolean shizukuDeleted = false;
+            try {
+                if (Shizuku.pingBinder()) {
+                    Method m = Shizuku.class.getDeclaredMethod("newProcess", String[].class, String[].class, String.class);
+                    m.setAccessible(true);
+                    Process process = (Process) m.invoke(null, (Object) new String[]{"sh"}, null, null);
+                    if (process != null) {
+                        DataOutputStream os = new DataOutputStream(process.getOutputStream());
+                        for (String f : fileNames) {
+                            String path = targetDir + "/" + f;
+                            os.writeBytes("rm -f \"" + path + "\"\n");
+                        }
+                        os.writeBytes("exit\n");
+                        os.flush();
+                        process.waitFor();
+                        shizukuDeleted = true;
+                    }
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "Shizuku cleanup on exit error: " + t.getMessage());
+            }
+
+            if (!shizukuDeleted) {
+                try {
+                    Process su = Runtime.getRuntime().exec("su");
+                    DataOutputStream os = new DataOutputStream(su.getOutputStream());
+                    for (String f : fileNames) {
+                        String path = targetDir + "/" + f;
+                        os.writeBytes("rm -f \"" + path + "\"\n");
+                    }
+                    os.writeBytes("exit\n");
+                    os.flush();
+                    su.waitFor();
+                } catch (Throwable ignored) {}
+            }
+
+            for (String f : fileNames) {
+                try {
+                    File file = new File(targetDir, f);
+                    if (file.exists()) {
+                        file.delete();
+                    }
+                } catch (Throwable ignored) {}
+            }
+
+            sp.edit().remove("last_target_dir").remove("last_pasted_files").apply();
+            Log.d(TAG, "Exit file cleanup completed successfully.");
+        } catch (Throwable t) {
+            Log.w(TAG, "performCleanup error: " + t.getMessage());
+        }
+    }
+
+    @PluginMethod
+    public void cleanupPastedFiles(PluginCall call) {
+        performCleanup(getContext());
+        JSObject ret = new JSObject();
+        ret.put("success", true);
+        ret.put("message", "All pasted files removed.");
+        call.resolve(ret);
+    }
+
     @Override
     protected void handleOnDestroy() {
         super.handleOnDestroy();
+        performCleanup(getContext());
         if (permissionListener != null) {
             try {
                 Shizuku.removeRequestPermissionResultListener(permissionListener);
+            } catch (Throwable ignored) {}
+        }
+        if (binderReceivedListener != null) {
+            try {
+                Shizuku.removeBinderReceivedListener(binderReceivedListener);
+            } catch (Throwable ignored) {}
+        }
+        if (binderDeadListener != null) {
+            try {
+                Shizuku.removeBinderDeadListener(binderDeadListener);
             } catch (Throwable ignored) {}
         }
     }

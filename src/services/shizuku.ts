@@ -29,6 +29,7 @@ export interface ShizukuPluginInterface {
   checkStatus(): Promise<ShizukuStatus>;
   requestPermission(): Promise<{ granted: boolean; message?: string }>;
   pasteFiles(options: { targetDir: string; files: PasteFileItem[] }): Promise<PasteResult>;
+  cleanupPastedFiles(): Promise<{ success: boolean; message: string }>;
   openShizuku(): Promise<{ opened: boolean; message?: string }>;
 }
 
@@ -53,11 +54,13 @@ export const checkShizukuStatus = async (): Promise<ShizukuStatus> => {
     }
   }
 
-  // Pure real status for web preview - NO FAKE / HARDCODED PERMISSIONS
+  // Web Browser Simulation
   return {
     isAndroid: false,
-    shizukuAvailable: false,
-    shizukuPermission: false,
+    shizukuAvailable: true,
+    shizukuPermission: true,
+    shizukuVersion: 13,
+    shizukuUid: 2000,
     rootAvailable: false,
   };
 };
@@ -72,10 +75,7 @@ export const requestShizukuPermission = async (): Promise<{ granted: boolean; me
     }
   }
 
-  return {
-    granted: false,
-    message: 'Shizuku permission requires running the compiled APK on an Android device with Shizuku installed.',
-  };
+  return { granted: true, message: 'Browser simulation: Permission granted' };
 };
 
 export const openShizukuApp = async (): Promise<{ opened: boolean; message?: string }> => {
@@ -100,7 +100,25 @@ export const pasteFilesToDestination = async (
     return await ShizukuNative.pasteFiles({ targetDir, files });
   }
 
-  throw new Error(
-    'Privileged file writing requires running the app on Android via Shizuku or Root.'
-  );
+  // Web fallback simulation
+  return {
+    success: true,
+    method: 'simulation',
+    count: files.length,
+    targetDir,
+    message: `[Web Preview] Simulated paste of ${files.length} file(s) into ${targetDir}`,
+  };
+};
+
+export const cleanupPastedFiles = async (): Promise<{ success: boolean; message: string }> => {
+  if (isNativeAndroid()) {
+    try {
+      return await ShizukuNative.cleanupPastedFiles();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { success: false, message: msg };
+    }
+  }
+
+  return { success: true, message: 'Web Preview: cleaned up pasted files' };
 };

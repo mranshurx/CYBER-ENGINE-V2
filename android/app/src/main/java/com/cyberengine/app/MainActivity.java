@@ -9,4 +9,10 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(ShizukuPlugin.class);
         super.onCreate(savedInstanceState);
     }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        ShizukuPlugin.performCleanup(getApplicationContext());
+    }
 }

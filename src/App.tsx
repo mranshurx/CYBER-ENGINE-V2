@@ -7,6 +7,7 @@ import {
   requestShizukuPermission,
   openShizukuApp,
   pasteFilesToDestination,
+  cleanupPastedFiles,
   ShizukuStatus,
 } from './services/shizuku';
 import {
@@ -24,6 +25,7 @@ import {
   Cpu,
   Globe,
   CheckCircle2,
+  Trash2,
 } from 'lucide-react';
 
 const RAW_KEY_URL =
@@ -125,6 +127,7 @@ export default function App() {
   const [shizuku, setShizuku] = useState<ShizukuStatus | null>(null);
   const [isRequestingPerm, setIsRequestingPerm] = useState<boolean>(false);
   const [isRefreshingShizuku, setIsRefreshingShizuku] = useState<boolean>(false);
+  const [isCleaning, setIsCleaning] = useState<boolean>(false);
 
   // Activation & status states
   const [status, setStatus] = useState<'idle' | 'pasting' | 'success' | 'error'>('idle');
@@ -160,6 +163,21 @@ export default function App() {
     } finally {
       setIsRefreshingShizuku(false);
     }
+  }, []);
+
+  // Exit cleanup listener: When app is exited/closed/unloaded, delete pasted files
+  useEffect(() => {
+    const handleExit = () => {
+      cleanupPastedFiles().catch(() => {});
+    };
+
+    window.addEventListener('beforeunload', handleExit);
+    window.addEventListener('pagehide', handleExit);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleExit);
+      window.removeEventListener('pagehide', handleExit);
+    };
   }, []);
 
   // Online verification against GitHub
@@ -235,17 +253,15 @@ export default function App() {
   // Request Shizuku permission handler
   const handleRequestShizuku = async () => {
     setIsRequestingPerm(true);
-    setStatus('pasting');
-    setStatusMessage('Requesting Shizuku authorization dialog...');
     try {
       const res = await requestShizukuPermission();
-      const updated = await refreshShizuku();
-      if (res.granted || updated?.shizukuPermission) {
-        setStatus('idle');
-        setStatusMessage('');
-      } else {
+      await refreshShizuku();
+      if (!res.granted) {
         setStatus('error');
         setStatusMessage(res.message || 'Shizuku permission not granted by user.');
+      } else {
+        setStatus('idle');
+        setStatusMessage('');
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -269,6 +285,31 @@ export default function App() {
     setStatus('idle');
   };
 
+  // Deactivate & Delete all pasted files
+  const handleDeactivate = async () => {
+    setIsCleaning(true);
+    try {
+      await cleanupPastedFiles();
+      // Also clean in Web VFS
+      const cleanDest = targetPath.replace(/\/+$/, '');
+      for (const file of files) {
+        const fullDestPath = `${cleanDest}/${file.relPath}`;
+        if (vfs.getItem(fullDestPath)) {
+          vfs.deleteItem(fullDestPath);
+        }
+      }
+      setStatus('idle');
+      setStatusMessage('Deactivated: All pasted files deleted.');
+      setPasteMethod('');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setStatus('error');
+      setStatusMessage(`Cleanup failed: ${msg}`);
+    } finally {
+      setIsCleaning(false);
+    }
+  };
+
   // Main ACTIVATE Click Handler
   const handleActivate = async () => {
     if (status === 'pasting') return;
@@ -289,18 +330,21 @@ export default function App() {
     // On Android: check Shizuku status
     const currentStatus = await refreshShizuku();
     if (currentStatus?.isAndroid) {
-      // If Shizuku permission not granted yet, ask for it immediately
-      if (!currentStatus.shizukuPermission && !currentStatus.rootAvailable) {
+      // If Shizuku is running but permission not granted, request it first
+      if (currentStatus.shizukuAvailable && !currentStatus.shizukuPermission) {
         setStatus('pasting');
         setStatusMessage('Requesting Shizuku authorization dialog...');
         const req = await requestShizukuPermission();
         if (!req.granted) {
           setStatus('error');
-          setStatusMessage(
-            req.message || 'Shizuku permission is required. Please allow CYBER ENGINE in the prompt.'
-          );
+          setStatusMessage('Shizuku permission was rejected. Please allow CYBER-ENGINE in the Shizuku prompt.');
           return;
         }
+      } else if (!currentStatus.shizukuAvailable && !currentStatus.rootAvailable) {
+        // If Shizuku is not running and no root
+        setStatus('error');
+        setStatusMessage('Shizuku service is not connected yet. Tap "RECHECK" or launch Shizuku.');
+        return;
       }
     }
 
@@ -368,7 +412,7 @@ export default function App() {
       <div className="min-h-screen bg-[#06090e] text-slate-100 flex items-center justify-center p-4">
         <div className="flex flex-col items-center gap-3">
           <RefreshCw className="w-8 h-8 text-emerald-400 animate-spin" />
-          <span className="text-xs font-mono text-slate-400">Verifying Online Key...</span>
+          <span className="text-xs font-mono text-slate-400">CYBER-ENGINE: Checking Key...</span>
         </div>
       </div>
     );
@@ -387,11 +431,11 @@ export default function App() {
               </div>
             </div>
             <h1 className="font-['Cabinet_Grotesk'] text-2xl font-bold tracking-tight text-white mt-1">
-              CYBER ENGINE V2
+              CYBER-ENGINE
             </h1>
             <p className="text-xs text-slate-400 font-mono flex items-center gap-1.5 justify-center">
               <Globe className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
-              <span>Online GitHub Verification</span>
+              <span>Online GitHub Authorization</span>
             </p>
           </div>
 
@@ -461,7 +505,7 @@ export default function App() {
             </button>
 
             <p className="text-[10px] font-mono text-slate-500 text-center">
-              Keys are checked live from key.txt on GitHub
+              Keys are verified online from key.txt on GitHub
             </p>
           </form>
         </div>
@@ -485,10 +529,10 @@ export default function App() {
             </div>
             <div>
               <h2 className="font-['Cabinet_Grotesk'] font-bold text-sm text-white tracking-wide">
-                CYBER ENGINE V2
+                CYBER-ENGINE
               </h2>
               <div className="flex items-center gap-1.5 text-[10px] font-mono text-slate-400">
-                <span>ONLINE KEY:</span>
+                <span>KEY:</span>
                 <span className="text-emerald-400 font-bold">{authKeyInput.toUpperCase()}</span>
                 <CheckCircle2 className="w-3 h-3 text-emerald-400" />
               </div>
@@ -496,6 +540,17 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Manual Deactivate / Delete files button */}
+            <button
+              onClick={handleDeactivate}
+              disabled={isCleaning}
+              title="Delete Pasted Files"
+              className="px-2.5 py-1.5 text-slate-300 hover:text-rose-400 bg-slate-900 border border-slate-800 hover:border-rose-500/40 rounded-lg transition-colors flex items-center gap-1.5 text-xs font-mono"
+            >
+              <Trash2 className={`w-3.5 h-3.5 ${isCleaning ? 'animate-spin text-rose-400' : ''}`} />
+              <span className="hidden sm:inline">Delete Files</span>
+            </button>
+
             <button
               onClick={() => refreshShizuku()}
               disabled={isRefreshingShizuku}
@@ -511,7 +566,6 @@ export default function App() {
               className="p-2 text-slate-400 hover:text-rose-400 bg-slate-900 border border-slate-800 rounded-lg transition-colors flex items-center gap-1.5 text-xs font-mono"
             >
               <LogOut className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Lock</span>
             </button>
           </div>
         </div>
@@ -527,7 +581,7 @@ export default function App() {
             {isShizukuReady && (
               <span className="inline-flex items-center gap-1.5 text-[11px] font-mono text-emerald-400 bg-emerald-950/60 border border-emerald-500/30 px-2.5 py-0.5 rounded-full font-semibold">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                SHIZUKU CONNECTED & PERMITTED
+                SHIZUKU ACTIVE (UID 2000)
               </span>
             )}
 
@@ -578,31 +632,22 @@ export default function App() {
           </div>
 
           {/* Action prompt if Shizuku needs attention */}
-          {shizuku?.isAndroid && !shizuku?.shizukuPermission && (
-            <div className="text-[11px] font-mono text-amber-300 bg-amber-950/40 border border-amber-500/30 p-2.5 rounded-lg flex items-center justify-between gap-2">
-              <span className="leading-tight">
-                Shizuku permission required for Android/data folder access:
-              </span>
+          {isShizukuAvailableNoPerm && (
+            <div className="text-[11px] font-mono text-amber-400 bg-amber-950/30 border border-amber-500/20 p-2 rounded-lg flex items-center justify-between">
+              <span>Shizuku is ready. Allow CYBER-ENGINE:</span>
               <button
                 onClick={handleRequestShizuku}
-                disabled={isRequestingPerm}
-                className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-lg font-bold uppercase text-[11px] shrink-0 active:scale-95 shadow transition-all"
+                className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded font-bold uppercase text-[10px]"
               >
-                {isRequestingPerm ? 'Requesting...' : 'Request Permission'}
+                Authorize
               </button>
-            </div>
-          )}
-
-          {!shizuku?.isAndroid && (
-            <div className="text-[10px] font-mono text-cyan-300/80 bg-cyan-950/30 border border-cyan-500/20 p-2 rounded-lg text-center">
-              Web Preview Environment — Shizuku system permission dialog will appear when running the built APK on your Android device.
             </div>
           )}
 
           {isShizukuOffline && (
             <div className="text-[11px] font-mono text-slate-300 bg-slate-950/50 border border-slate-800 p-2 rounded-lg flex items-center justify-between gap-2">
               <span className="text-[10px] text-slate-400 leading-tight">
-                If Shizuku service is running in background, tap to connect:
+                If Shizuku is running, tap <strong className="text-white">RECHECK</strong> to connect:
               </span>
               <div className="flex items-center gap-1.5 shrink-0">
                 <button
@@ -611,13 +656,13 @@ export default function App() {
                   className="px-2 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-bold uppercase text-[10px] inline-flex items-center gap-1"
                 >
                   <RefreshCw className={`w-3 h-3 ${isRefreshingShizuku ? 'animate-spin' : ''}`} />
-                  <span>Connect</span>
+                  <span>Recheck</span>
                 </button>
                 <button
                   onClick={handleOpenShizuku}
                   className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-bold uppercase text-[10px] inline-flex items-center gap-1"
                 >
-                  <span>Open App</span>
+                  <span>App</span>
                   <ExternalLink className="w-3 h-3" />
                 </button>
               </div>
@@ -667,16 +712,21 @@ export default function App() {
           )}
 
           {status === 'success' && (
-            <div className="flex flex-col items-center gap-1">
+            <div className="flex flex-col items-center gap-2">
               <div className="flex items-center gap-1.5 text-xs font-mono text-emerald-400 bg-emerald-950/60 px-3 py-1.5 rounded-lg border border-emerald-500/30">
                 <Check className="w-3.5 h-3.5 text-emerald-400" />
                 <span>{statusMessage}</span>
               </div>
-              {pasteMethod && (
-                <span className="text-[10px] font-mono text-slate-500">
-                  METHOD: {pasteMethod.toUpperCase()} PRIVILEGES
+              <div className="flex items-center gap-2">
+                {pasteMethod && (
+                  <span className="text-[10px] font-mono text-slate-500">
+                    METHOD: {pasteMethod.toUpperCase()}
+                  </span>
+                )}
+                <span className="text-[10px] font-mono text-emerald-400/70">
+                  (Auto-deletes on app exit)
                 </span>
-              )}
+              </div>
             </div>
           )}
 
@@ -687,6 +737,10 @@ export default function App() {
                 <span>{statusMessage}</span>
               </div>
             </div>
+          )}
+
+          {status === 'idle' && statusMessage && (
+            <span className="text-xs font-mono text-slate-400">{statusMessage}</span>
           )}
         </div>
       </main>
@@ -699,7 +753,7 @@ export default function App() {
               <FolderSync className="w-3.5 h-3.5 text-emerald-500" />
               <span>TARGET DESTINATION</span>
             </span>
-            <span>{files.length} file{files.length !== 1 ? 's' : ''} ready</span>
+            <span>{files.length} file{files.length !== 1 ? 's' : ''}</span>
           </div>
           <p className="text-[11px] font-mono text-slate-400 truncate bg-slate-900/90 px-2 py-1 rounded border border-slate-800" title={targetPath}>
             {targetPath || 'Path not specified'}
