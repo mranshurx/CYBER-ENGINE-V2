@@ -29,7 +29,7 @@ import {
 const RAW_KEY_URL =
   'https://raw.githubusercontent.com/mranshurx/CYBER-ENGINE-V2/refs/heads/main/key.txt';
 
-// Helper to fetch live keys directly from GitHub online with zero cache
+// Helper to fetch live keys directly from GitHub online with simple CORS requests (no custom headers)
 async function fetchOnlineValidKeys(): Promise<string[]> {
   const cleanKeys = (text: string) =>
     text
@@ -40,18 +40,55 @@ async function fetchOnlineValidKeys(): Promise<string[]> {
   const timestamp = Date.now();
   const randomSalt = Math.floor(Math.random() * 1000000);
 
-  // 1. Try GitHub REST API first (Instant update, zero CDN cache delay)
+  // 1. Primary: Direct raw GitHub URL (Simple GET request without custom headers to avoid CORS preflight 403)
+  try {
+    const rawRes = await fetch(
+      `https://raw.githubusercontent.com/mranshurx/CYBER-ENGINE-V2/refs/heads/main/key.txt?_t=${timestamp}_${randomSalt}`
+    );
+
+    if (rawRes.ok) {
+      const text = await rawRes.text();
+      const keys = cleanKeys(text);
+      if (keys.length > 0) return keys;
+    }
+  } catch (rawErr) {
+    console.warn('Primary raw key fetch failed:', rawErr);
+  }
+
+  // 2. Secondary: Direct /main/ branch raw URL
+  try {
+    const altRes = await fetch(
+      `https://raw.githubusercontent.com/mranshurx/CYBER-ENGINE-V2/main/key.txt?_t=${timestamp}_${randomSalt}`
+    );
+
+    if (altRes.ok) {
+      const text = await altRes.text();
+      const keys = cleanKeys(text);
+      if (keys.length > 0) return keys;
+    }
+  } catch (altErr) {
+    console.warn('Secondary raw key fetch failed:', altErr);
+  }
+
+  // 3. Fallback: Fast jsDelivr CDN
+  try {
+    const cdnRes = await fetch(
+      `https://cdn.jsdelivr.net/gh/mranshurx/CYBER-ENGINE-V2@main/key.txt?_t=${timestamp}`
+    );
+
+    if (cdnRes.ok) {
+      const text = await cdnRes.text();
+      const keys = cleanKeys(text);
+      if (keys.length > 0) return keys;
+    }
+  } catch (cdnErr) {
+    console.warn('jsDelivr key fetch failed:', cdnErr);
+  }
+
+  // 4. Fallback: GitHub REST API
   try {
     const apiRes = await fetch(
-      `https://api.github.com/repos/mranshurx/CYBER-ENGINE-V2/contents/key.txt?ref=main&t=${timestamp}`,
-      {
-        cache: 'no-store',
-        headers: {
-          Accept: 'application/vnd.github.v3+json',
-          'Cache-Control': 'no-cache, no-store, must-revalidate',
-          Pragma: 'no-cache',
-        },
-      }
+      `https://api.github.com/repos/mranshurx/CYBER-ENGINE-V2/contents/key.txt?ref=main&_t=${timestamp}`
     );
 
     if (apiRes.ok) {
@@ -63,55 +100,10 @@ async function fetchOnlineValidKeys(): Promise<string[]> {
       }
     }
   } catch (apiErr) {
-    console.warn('GitHub API key fetch failed, falling back to raw URL:', apiErr);
+    console.warn('GitHub API key fetch failed:', apiErr);
   }
 
-  // 2. Try raw GitHub URL with refs/heads/main and aggressive anti-caching
-  try {
-    const rawRes = await fetch(
-      `${RAW_KEY_URL}?t=${timestamp}&r=${randomSalt}`,
-      {
-        cache: 'no-store',
-        headers: {
-          'Cache-Control': 'no-cache, no-store, must-revalidate',
-          Pragma: 'no-cache',
-          Expires: '0',
-        },
-      }
-    );
-
-    if (rawRes.ok) {
-      const text = await rawRes.text();
-      const keys = cleanKeys(text);
-      if (keys.length > 0) return keys;
-    }
-  } catch (rawErr) {
-    console.warn('GitHub raw key fetch failed:', rawErr);
-  }
-
-  // 3. Fallback to standard main branch raw URL
-  try {
-    const altRes = await fetch(
-      `https://raw.githubusercontent.com/mranshurx/CYBER-ENGINE-V2/main/key.txt?t=${timestamp}&r=${randomSalt}`,
-      {
-        cache: 'no-store',
-        headers: {
-          'Cache-Control': 'no-cache, no-store, must-revalidate',
-          Pragma: 'no-cache',
-        },
-      }
-    );
-
-    if (altRes.ok) {
-      const text = await altRes.text();
-      const keys = cleanKeys(text);
-      if (keys.length > 0) return keys;
-    }
-  } catch (altErr) {
-    console.warn('GitHub alt raw key fetch failed:', altErr);
-  }
-
-  throw new Error('Unable to connect to GitHub. Please verify your internet connection.');
+  throw new Error('Unable to connect to GitHub. Please check your internet connection.');
 }
 
 // Eagerly glob all files placed in the anshu-on-top folder
@@ -206,7 +198,7 @@ export default function App() {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (!isSilent) {
-        setAuthError(`Online check error: ${msg}. Please check your connection.`);
+        setAuthError(msg);
       } else {
         // In silent mode, if offline, allow cached key only if already saved
         const savedKey = localStorage.getItem('cyber_engine_auth_key');
