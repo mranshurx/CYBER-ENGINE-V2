@@ -53,13 +53,11 @@ export const checkShizukuStatus = async (): Promise<ShizukuStatus> => {
     }
   }
 
-  // Web Browser Simulation
+  // Pure real status for web preview - NO FAKE / HARDCODED PERMISSIONS
   return {
     isAndroid: false,
-    shizukuAvailable: true,
-    shizukuPermission: true,
-    shizukuVersion: 13,
-    shizukuUid: 2000,
+    shizukuAvailable: false,
+    shizukuPermission: false,
     rootAvailable: false,
   };
 };
@@ -74,7 +72,10 @@ export const requestShizukuPermission = async (): Promise<{ granted: boolean; me
     }
   }
 
-  return { granted: true, message: 'Browser simulation: Permission granted' };
+  return {
+    granted: false,
+    message: 'Shizuku permission requires running the compiled APK on an Android device with Shizuku installed.',
+  };
 };
 
 export const openShizukuApp = async (): Promise<{ opened: boolean; message?: string }> => {
@@ -99,12 +100,7 @@ export const pasteFilesToDestination = async (
     return await ShizukuNative.pasteFiles({ targetDir, files });
   }
 
-  // Web fallback simulation
-  return {
-    success: true,
-    method: 'simulation',
-    count: files.length,
-    targetDir,
-    message: `[Web Preview] Simulated paste of ${files.length} file(s) into ${targetDir}`,
-  };
+  throw new Error(
+    'Privileged file writing requires running the app on Android via Shizuku or Root.'
+  );
 };

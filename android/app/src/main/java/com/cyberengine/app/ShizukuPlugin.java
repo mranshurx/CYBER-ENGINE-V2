@@ -149,26 +149,29 @@ public class ShizukuPlugin extends Plugin {
 
     @PluginMethod
     public void requestPermission(PluginCall call) {
-        if (!isShizukuRunning()) {
-            call.reject("Shizuku is not running. Please open the Shizuku app and start the service first.");
-            return;
-        }
-
         if (hasShizukuPermission()) {
             JSObject ret = new JSObject();
             ret.put("granted", true);
-            ret.put("message", "Permission already granted");
+            ret.put("message", "Permission already granted in Shizuku");
             call.resolve(ret);
             return;
         }
 
-        try {
-            pendingPermissionCall = call;
-            Shizuku.requestPermission(SHIZUKU_REQ_CODE);
-        } catch (Throwable t) {
-            pendingPermissionCall = null;
-            call.reject("Failed to request Shizuku permission: " + t.getMessage());
-        }
+        pendingPermissionCall = call;
+        getActivity().runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Shizuku.requestPermission(SHIZUKU_REQ_CODE);
+                } catch (Throwable t) {
+                    Log.e(TAG, "Shizuku requestPermission failed: " + t.getMessage(), t);
+                    if (pendingPermissionCall != null) {
+                        pendingPermissionCall.reject("Shizuku service is not active (" + t.getMessage() + "). Please open Shizuku and start it via Wireless Debugging or Root.");
+                        pendingPermissionCall = null;
+                    }
+                }
+            }
+        });
     }
 
     @PluginMethod
