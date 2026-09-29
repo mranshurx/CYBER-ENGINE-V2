@@ -1,0 +1,6 @@
+{
+  "name": "Shizuku File Manager & Copy-Paste Hub",
+  "description": "High-performance dual-pane Android file manager and copy-pasting suite with Shizuku / rish integration, Scoped Storage bypass, batch transfer automation, and interactive terminal.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

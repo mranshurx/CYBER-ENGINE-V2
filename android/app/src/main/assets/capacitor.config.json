@@ -1,0 +1,8 @@
+{
+	"appId": "com.cyberengine.app",
+	"appName": "Cyber Engine V2",
+	"webDir": "dist",
+	"android": {
+		"allowMixedContent": true
+	}
+}
