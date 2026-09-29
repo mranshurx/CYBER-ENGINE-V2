@@ -7,7 +7,6 @@ import {
   requestShizukuPermission,
   openShizukuApp,
   pasteFilesToDestination,
-  isNativeAndroid,
   ShizukuStatus,
 } from './services/shizuku';
 import {
@@ -18,16 +17,102 @@ import {
   Key,
   Lock,
   Unlock,
-  ShieldCheck,
   LogOut,
   FolderSync,
   ExternalLink,
   Smartphone,
   Cpu,
+  Globe,
+  CheckCircle2,
 } from 'lucide-react';
 
-const KEY_URL =
+const RAW_KEY_URL =
   'https://raw.githubusercontent.com/mranshurx/CYBER-ENGINE-V2/refs/heads/main/key.txt';
+
+// Helper to fetch live keys directly from GitHub online with zero cache
+async function fetchOnlineValidKeys(): Promise<string[]> {
+  const cleanKeys = (text: string) =>
+    text
+      .split(/[\r\n,]+/)
+      .map((k) => k.trim())
+      .filter(Boolean);
+
+  const timestamp = Date.now();
+  const randomSalt = Math.floor(Math.random() * 1000000);
+
+  // 1. Try GitHub REST API first (Instant update, zero CDN cache delay)
+  try {
+    const apiRes = await fetch(
+      `https://api.github.com/repos/mranshurx/CYBER-ENGINE-V2/contents/key.txt?ref=main&t=${timestamp}`,
+      {
+        cache: 'no-store',
+        headers: {
+          Accept: 'application/vnd.github.v3+json',
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          Pragma: 'no-cache',
+        },
+      }
+    );
+
+    if (apiRes.ok) {
+      const data = await apiRes.json();
+      if (data && data.content && data.encoding === 'base64') {
+        const decoded = atob(data.content.replace(/\s/g, ''));
+        const keys = cleanKeys(decoded);
+        if (keys.length > 0) return keys;
+      }
+    }
+  } catch (apiErr) {
+    console.warn('GitHub API key fetch failed, falling back to raw URL:', apiErr);
+  }
+
+  // 2. Try raw GitHub URL with refs/heads/main and aggressive anti-caching
+  try {
+    const rawRes = await fetch(
+      `${RAW_KEY_URL}?t=${timestamp}&r=${randomSalt}`,
+      {
+        cache: 'no-store',
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          Pragma: 'no-cache',
+          Expires: '0',
+        },
+      }
+    );
+
+    if (rawRes.ok) {
+      const text = await rawRes.text();
+      const keys = cleanKeys(text);
+      if (keys.length > 0) return keys;
+    }
+  } catch (rawErr) {
+    console.warn('GitHub raw key fetch failed:', rawErr);
+  }
+
+  // 3. Fallback to standard main branch raw URL
+  try {
+    const altRes = await fetch(
+      `https://raw.githubusercontent.com/mranshurx/CYBER-ENGINE-V2/main/key.txt?t=${timestamp}&r=${randomSalt}`,
+      {
+        cache: 'no-store',
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          Pragma: 'no-cache',
+        },
+      }
+    );
+
+    if (altRes.ok) {
+      const text = await altRes.text();
+      const keys = cleanKeys(text);
+      if (keys.length > 0) return keys;
+    }
+  } catch (altErr) {
+    console.warn('GitHub alt raw key fetch failed:', altErr);
+  }
+
+  throw new Error('Unable to connect to GitHub. Please verify your internet connection.');
+}
 
 // Eagerly glob all files placed in the anshu-on-top folder
 const codeFilesGlob = import.meta.glob('./anshu-on-top/**/*', {
@@ -47,6 +132,7 @@ export default function App() {
   // Shizuku native states
   const [shizuku, setShizuku] = useState<ShizukuStatus | null>(null);
   const [isRequestingPerm, setIsRequestingPerm] = useState<boolean>(false);
+  const [isRefreshingShizuku, setIsRefreshingShizuku] = useState<boolean>(false);
 
   // Activation & status states
   const [status, setStatus] = useState<'idle' | 'pasting' | 'success' | 'error'>('idle');
@@ -72,14 +158,67 @@ export default function App() {
 
   // Refresh Shizuku status
   const refreshShizuku = useCallback(async () => {
+    setIsRefreshingShizuku(true);
     try {
       const s = await checkShizukuStatus();
       setShizuku(s);
       return s;
     } catch {
       return null;
+    } finally {
+      setIsRefreshingShizuku(false);
     }
   }, []);
+
+  // Online verification against GitHub
+  const verifyKeyAgainstGithub = async (keyToTest: string, isSilent = false) => {
+    const trimmedInput = keyToTest.trim();
+    if (!trimmedInput) {
+      if (!isSilent) setAuthError('Please enter an authorization key.');
+      setIsInitialCheckDone(true);
+      return;
+    }
+
+    setIsVerifying(true);
+    setAuthError(null);
+
+    try {
+      // 100% online verification from GitHub
+      const validKeys = await fetchOnlineValidKeys();
+
+      const isValid = validKeys.some(
+        (valid) => valid.toLowerCase() === trimmedInput.toLowerCase()
+      );
+
+      if (isValid) {
+        localStorage.setItem('cyber_engine_auth_key', trimmedInput);
+        setIsAuthenticated(true);
+        setAuthError(null);
+        setTimeout(() => refreshShizuku(), 100);
+      } else {
+        // If the key was changed on GitHub and is no longer valid, clear local storage
+        localStorage.removeItem('cyber_engine_auth_key');
+        setIsAuthenticated(false);
+        setAuthError(
+          'Access Denied: Invalid key. If you just updated key.txt on GitHub, please enter the new key.'
+        );
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!isSilent) {
+        setAuthError(`Online check error: ${msg}. Please check your connection.`);
+      } else {
+        // In silent mode, if offline, allow cached key only if already saved
+        const savedKey = localStorage.getItem('cyber_engine_auth_key');
+        if (savedKey && savedKey.toLowerCase() === trimmedInput.toLowerCase()) {
+          setIsAuthenticated(true);
+        }
+      }
+    } finally {
+      setIsVerifying(false);
+      setIsInitialCheckDone(true);
+    }
+  };
 
   // Check saved key on mount
   useEffect(() => {
@@ -96,7 +235,7 @@ export default function App() {
   useEffect(() => {
     if (isAuthenticated) {
       refreshShizuku();
-      const interval = setInterval(refreshShizuku, 4000);
+      const interval = setInterval(refreshShizuku, 3500);
       return () => clearInterval(interval);
     }
   }, [isAuthenticated, refreshShizuku]);
@@ -126,61 +265,6 @@ export default function App() {
   // Launch Shizuku app
   const handleOpenShizuku = async () => {
     await openShizukuApp();
-  };
-
-  // Fetch and verify key from GitHub repository
-  const verifyKeyAgainstGithub = async (keyToTest: string, isSilent = false) => {
-    const trimmedInput = keyToTest.trim();
-    if (!trimmedInput) {
-      if (!isSilent) setAuthError('Please enter an authorization key.');
-      setIsInitialCheckDone(true);
-      return;
-    }
-
-    setIsVerifying(true);
-    setAuthError(null);
-
-    try {
-      const res = await fetch(`${KEY_URL}?t=${Date.now()}`, {
-        cache: 'no-store',
-      });
-
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}: Failed to fetch key from GitHub`);
-      }
-
-      const remoteRaw = await res.text();
-      const validKeys = remoteRaw
-        .split(/[\r\n,]+/)
-        .map((k) => k.trim())
-        .filter(Boolean);
-
-      const isValid = validKeys.some(
-        (valid) => valid.toLowerCase() === trimmedInput.toLowerCase()
-      );
-
-      if (isValid) {
-        localStorage.setItem('cyber_engine_auth_key', trimmedInput);
-        setIsAuthenticated(true);
-        setAuthError(null);
-        // Refresh Shizuku immediately upon auth
-        setTimeout(() => refreshShizuku(), 100);
-      } else {
-        setIsAuthenticated(false);
-        setAuthError('Access Denied: Invalid key. Please check key.txt on GitHub.');
-      }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const savedKey = localStorage.getItem('cyber_engine_auth_key');
-      if (savedKey && savedKey.toLowerCase() === trimmedInput.toLowerCase()) {
-        setIsAuthenticated(true);
-      } else {
-        setAuthError(`Verification failed: ${msg}. Check network or GitHub URL.`);
-      }
-    } finally {
-      setIsVerifying(false);
-      setIsInitialCheckDone(true);
-    }
   };
 
   const handleLogout = () => {
@@ -224,7 +308,7 @@ export default function App() {
       } else if (!currentStatus.shizukuAvailable && !currentStatus.rootAvailable) {
         // If Shizuku is not running and no root
         setStatus('error');
-        setStatusMessage('Shizuku service is not running. Tap "OPEN SHIZUKU" below to start it.');
+        setStatusMessage('Shizuku service is not connected yet. Tap "RECHECK" or launch Shizuku.');
         return;
       }
     }
@@ -293,7 +377,7 @@ export default function App() {
       <div className="min-h-screen bg-[#06090e] text-slate-100 flex items-center justify-center p-4">
         <div className="flex flex-col items-center gap-3">
           <RefreshCw className="w-8 h-8 text-emerald-400 animate-spin" />
-          <span className="text-xs font-mono text-slate-400">Verifying Authorization...</span>
+          <span className="text-xs font-mono text-slate-400">Verifying Online Key...</span>
         </div>
       </div>
     );
@@ -314,8 +398,9 @@ export default function App() {
             <h1 className="font-['Cabinet_Grotesk'] text-2xl font-bold tracking-tight text-white mt-1">
               CYBER ENGINE V2
             </h1>
-            <p className="text-xs text-slate-400 font-mono">
-              Key Authorization Required
+            <p className="text-xs text-slate-400 font-mono flex items-center gap-1.5 justify-center">
+              <Globe className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+              <span>Online GitHub Verification</span>
             </p>
           </div>
 
@@ -328,9 +413,14 @@ export default function App() {
             className="w-full bg-slate-900/60 border border-slate-800 rounded-2xl p-6 backdrop-blur-md flex flex-col gap-4 shadow-2xl"
           >
             <div>
-              <label className="text-xs text-slate-400 font-mono block mb-2">
-                <span>ENTER ACTIVATION KEY:</span>
-              </label>
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-xs text-slate-400 font-mono">
+                  ENTER ACTIVATION KEY:
+                </label>
+                <span className="text-[10px] font-mono text-emerald-400/80">
+                  LIVE CHECK
+                </span>
+              </div>
 
               <div className="relative">
                 <input
@@ -369,15 +459,19 @@ export default function App() {
               {isVerifying ? (
                 <>
                   <RefreshCw className="w-4 h-4 animate-spin text-slate-950" />
-                  <span>CHECKING KEY...</span>
+                  <span>CHECKING GITHUB ONLINE...</span>
                 </>
               ) : (
                 <>
                   <Unlock className="w-4 h-4" />
-                  <span>AUTHORIZE ACCESS</span>
+                  <span>VERIFY & AUTHORIZE</span>
                 </>
               )}
             </button>
+
+            <p className="text-[10px] font-mono text-slate-500 text-center">
+              Keys are checked live from key.txt on GitHub
+            </p>
           </form>
         </div>
       </div>
@@ -402,20 +496,33 @@ export default function App() {
               <h2 className="font-['Cabinet_Grotesk'] font-bold text-sm text-white tracking-wide">
                 CYBER ENGINE V2
               </h2>
-              <p className="text-[10px] font-mono text-slate-400">
-                Authorized: <span className="text-emerald-400 font-bold">{authKeyInput.toUpperCase()}</span>
-              </p>
+              <div className="flex items-center gap-1.5 text-[10px] font-mono text-slate-400">
+                <span>ONLINE KEY:</span>
+                <span className="text-emerald-400 font-bold">{authKeyInput.toUpperCase()}</span>
+                <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+              </div>
             </div>
           </div>
 
-          <button
-            onClick={handleLogout}
-            title="Lock / Logout"
-            className="p-2 text-slate-400 hover:text-rose-400 bg-slate-900 border border-slate-800 rounded-lg transition-colors flex items-center gap-1.5 text-xs font-mono"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Lock</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => refreshShizuku()}
+              disabled={isRefreshingShizuku}
+              title="Refresh status"
+              className="p-2 text-slate-400 hover:text-emerald-400 bg-slate-900 border border-slate-800 rounded-lg transition-colors flex items-center text-xs"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingShizuku ? 'animate-spin text-emerald-400' : ''}`} />
+            </button>
+
+            <button
+              onClick={handleLogout}
+              title="Lock / Logout"
+              className="p-2 text-slate-400 hover:text-rose-400 bg-slate-900 border border-slate-800 rounded-lg transition-colors flex items-center gap-1.5 text-xs font-mono"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Lock</span>
+            </button>
+          </div>
         </div>
 
         {/* Shizuku Status Badge / Bar */}
@@ -427,9 +534,9 @@ export default function App() {
             </span>
 
             {isShizukuReady && (
-              <span className="inline-flex items-center gap-1.5 text-[11px] font-mono text-emerald-400 bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded-full font-semibold">
+              <span className="inline-flex items-center gap-1.5 text-[11px] font-mono text-emerald-400 bg-emerald-950/60 border border-emerald-500/30 px-2.5 py-0.5 rounded-full font-semibold">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                SHIZUKU ACTIVE (UID {shizuku?.shizukuUid ?? 2000})
+                SHIZUKU CONNECTED & PERMITTED
               </span>
             )}
 
@@ -451,13 +558,24 @@ export default function App() {
             )}
 
             {isShizukuOffline && (
-              <button
-                onClick={handleOpenShizuku}
-                className="inline-flex items-center gap-1.5 text-[11px] font-mono text-rose-400 bg-rose-950/60 border border-rose-500/30 px-2 py-0.5 rounded-full font-semibold hover:bg-rose-900/60 transition-colors"
-              >
-                <AlertCircle className="w-3 h-3" />
-                <span>START SHIZUKU</span>
-              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => refreshShizuku()}
+                  disabled={isRefreshingShizuku}
+                  className="inline-flex items-center gap-1 text-[11px] font-mono text-slate-300 bg-slate-800 border border-slate-700 px-2 py-0.5 rounded-full hover:bg-slate-700 transition-colors"
+                >
+                  <RefreshCw className={`w-3 h-3 ${isRefreshingShizuku ? 'animate-spin' : ''}`} />
+                  <span>RECHECK</span>
+                </button>
+
+                <button
+                  onClick={handleOpenShizuku}
+                  className="inline-flex items-center gap-1.5 text-[11px] font-mono text-rose-400 bg-rose-950/60 border border-rose-500/30 px-2 py-0.5 rounded-full font-semibold hover:bg-rose-900/60 transition-colors"
+                >
+                  <AlertCircle className="w-3 h-3" />
+                  <span>OPEN SHIZUKU</span>
+                </button>
+              </div>
             )}
 
             {!shizuku?.isAndroid && (
@@ -471,10 +589,10 @@ export default function App() {
           {/* Action prompt if Shizuku needs attention */}
           {isShizukuAvailableNoPerm && (
             <div className="text-[11px] font-mono text-amber-400 bg-amber-950/30 border border-amber-500/20 p-2 rounded-lg flex items-center justify-between">
-              <span>Shizuku is running. Tap button to authorize CYBER ENGINE:</span>
+              <span>Shizuku is ready. Allow CYBER ENGINE:</span>
               <button
                 onClick={handleRequestShizuku}
-                className="px-2 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded font-bold uppercase text-[10px]"
+                className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded font-bold uppercase text-[10px]"
               >
                 Authorize
               </button>
@@ -482,15 +600,27 @@ export default function App() {
           )}
 
           {isShizukuOffline && (
-            <div className="text-[11px] font-mono text-rose-400 bg-rose-950/30 border border-rose-500/20 p-2 rounded-lg flex items-center justify-between">
-              <span>Shizuku service is not running on Android:</span>
-              <button
-                onClick={handleOpenShizuku}
-                className="px-2 py-1 bg-rose-500 hover:bg-rose-400 text-slate-950 rounded font-bold uppercase text-[10px] inline-flex items-center gap-1"
-              >
-                <span>Open Shizuku</span>
-                <ExternalLink className="w-3 h-3" />
-              </button>
+            <div className="text-[11px] font-mono text-slate-300 bg-slate-950/50 border border-slate-800 p-2 rounded-lg flex items-center justify-between gap-2">
+              <span className="text-[10px] text-slate-400 leading-tight">
+                If Shizuku is already running, tap <strong className="text-white">RECHECK</strong> to bind:
+              </span>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  onClick={() => refreshShizuku()}
+                  disabled={isRefreshingShizuku}
+                  className="px-2 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-bold uppercase text-[10px] inline-flex items-center gap-1"
+                >
+                  <RefreshCw className={`w-3 h-3 ${isRefreshingShizuku ? 'animate-spin' : ''}`} />
+                  <span>Recheck</span>
+                </button>
+                <button
+                  onClick={handleOpenShizuku}
+                  className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-bold uppercase text-[10px] inline-flex items-center gap-1"
+                >
+                  <span>App</span>
+                  <ExternalLink className="w-3 h-3" />
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -556,15 +686,6 @@ export default function App() {
                 <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
                 <span>{statusMessage}</span>
               </div>
-              {isShizukuOffline && (
-                <button
-                  onClick={handleOpenShizuku}
-                  className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-mono rounded-md border border-slate-700 transition-colors inline-flex items-center gap-1.5"
-                >
-                  <ExternalLink className="w-3 h-3 text-slate-400" />
-                  <span>Launch Shizuku App</span>
-                </button>
-              )}
             </div>
           )}
         </div>

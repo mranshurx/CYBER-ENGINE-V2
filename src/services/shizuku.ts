@@ -4,6 +4,7 @@ export interface ShizukuStatus {
   isAndroid: boolean;
   shizukuAvailable: boolean;
   shizukuPermission: boolean;
+  shizukuInstalled?: boolean;
   shizukuVersion?: number;
   shizukuUid?: number;
   rootAvailable: boolean;

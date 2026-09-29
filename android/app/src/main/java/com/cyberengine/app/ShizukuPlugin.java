@@ -36,6 +36,8 @@ public class ShizukuPlugin extends Plugin {
 
     private PluginCall pendingPermissionCall = null;
     private Shizuku.OnRequestPermissionResultListener permissionListener = null;
+    private Shizuku.OnBinderReceivedListener binderReceivedListener = null;
+    private Shizuku.OnBinderDeadListener binderDeadListener = null;
 
     @Override
     public void load() {
@@ -53,16 +55,42 @@ public class ShizukuPlugin extends Plugin {
                 }
             }
         };
+
+        binderReceivedListener = new Shizuku.OnBinderReceivedListener() {
+            @Override
+            public void onBinderReceived() {
+                Log.d(TAG, "Shizuku binder received successfully!");
+            }
+        };
+
+        binderDeadListener = new Shizuku.OnBinderDeadListener() {
+            @Override
+            public void onBinderDead() {
+                Log.d(TAG, "Shizuku binder dead!");
+            }
+        };
+
         try {
             Shizuku.addRequestPermissionResultListener(permissionListener);
+            Shizuku.addBinderReceivedListenerSticky(binderReceivedListener);
+            Shizuku.addBinderDeadListener(binderDeadListener);
         } catch (Throwable t) {
-            Log.w(TAG, "Could not add Shizuku permission listener: " + t.getMessage());
+            Log.w(TAG, "Could not add Shizuku listeners: " + t.getMessage());
         }
     }
 
     private boolean isShizukuRunning() {
         try {
             return Shizuku.pingBinder();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private boolean isShizukuInstalled() {
+        try {
+            getContext().getPackageManager().getPackageInfo("moe.shizuku.privileged.api", 0);
+            return true;
         } catch (Throwable t) {
             return false;
         }
@@ -106,10 +134,12 @@ public class ShizukuPlugin extends Plugin {
         }
 
         boolean root = isRootAvailable();
+        boolean installed = isShizukuInstalled();
 
         ret.put("isAndroid", true);
         ret.put("shizukuAvailable", running);
         ret.put("shizukuPermission", perm);
+        ret.put("shizukuInstalled", installed);
         ret.put("shizukuVersion", version);
         ret.put("shizukuUid", uid);
         ret.put("rootAvailable", root);
