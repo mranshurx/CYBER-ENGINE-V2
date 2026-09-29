@@ -250,9 +250,8 @@ export default function App() {
             className="w-full bg-slate-900/60 border border-slate-800 rounded-2xl p-6 backdrop-blur-md flex flex-col gap-4 shadow-2xl"
           >
             <div>
-              <label className="text-xs text-slate-400 font-mono block mb-2 flex items-center justify-between">
+              <label className="text-xs text-slate-400 font-mono block mb-2">
                 <span>ENTER ACTIVATION KEY:</span>
-                <span className="text-[10px] text-slate-500">GitHub Verified</span>
               </label>
 
               <div className="relative">
@@ -263,7 +262,7 @@ export default function App() {
                     setAuthKeyInput(e.target.value);
                     if (authError) setAuthError(null);
                   }}
-                  placeholder="Enter key (e.g. ANSHU)..."
+                  placeholder="Enter key..."
                   className="w-full px-4 py-3 bg-slate-950 border border-slate-700/80 rounded-xl text-emerald-300 font-mono text-sm placeholder-slate-600 focus:outline-none focus:border-emerald-500 transition-colors uppercase tracking-wider"
                   autoFocus
                 />
@@ -292,7 +291,7 @@ export default function App() {
               {isVerifying ? (
                 <>
                   <RefreshCw className="w-4 h-4 animate-spin text-slate-950" />
-                  <span>CHECKING GITHUB...</span>
+                  <span>CHECKING KEY...</span>
                 </>
               ) : (
                 <>
@@ -301,19 +300,6 @@ export default function App() {
                 </>
               )}
             </button>
-
-            {/* Remote URL Info */}
-            <div className="pt-2 border-t border-slate-800/80 text-center">
-              <a
-                href={KEY_URL}
-                target="_blank"
-                rel="noreferrer"
-                className="text-[11px] font-mono text-slate-500 hover:text-emerald-400 transition-colors inline-flex items-center gap-1"
-              >
-                <span>Synced with GitHub key.txt</span>
-                <ExternalLink className="w-3 h-3" />
-              </a>
-            </div>
           </form>
         </div>
       </div>
