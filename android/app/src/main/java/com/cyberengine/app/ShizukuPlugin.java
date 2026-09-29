@@ -24,6 +24,7 @@ import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStreamReader;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 
 import rikka.shizuku.Shizuku;
@@ -174,9 +175,37 @@ public class ShizukuPlugin extends Plugin {
         executeViaDirectIO(call, targetDir, filesArray);
     }
 
+    private Process createShizukuProcess(String[] cmd) throws Exception {
+        try {
+            Method m = Shizuku.class.getDeclaredMethod("newProcess", String[].class, String[].class, String.class);
+            m.setAccessible(true);
+            Process p = (Process) m.invoke(null, (Object) cmd, null, null);
+            if (p != null) return p;
+        } catch (Throwable t) {
+            Log.w(TAG, "Reflection newProcess(String[], String[], String) failed: " + t.getMessage());
+        }
+
+        for (Method m : Shizuku.class.getDeclaredMethods()) {
+            if ("newProcess".equals(m.getName())) {
+                try {
+                    m.setAccessible(true);
+                    Class<?>[] pTypes = m.getParameterTypes();
+                    if (pTypes.length == 3) {
+                        Process p = (Process) m.invoke(null, (Object) cmd, null, null);
+                        if (p != null) return p;
+                    } else if (pTypes.length == 1) {
+                        Process p = (Process) m.invoke(null, (Object) cmd);
+                        if (p != null) return p;
+                    }
+                } catch (Throwable ignored) {}
+            }
+        }
+        throw new Exception("Unable to spawn process via Shizuku binder. Please ensure Shizuku service is running.");
+    }
+
     private void executeViaShizuku(PluginCall call, String targetDir, JSArray filesArray) {
         try {
-            Process process = Shizuku.newProcess(new String[]{"sh"}, null, null);
+            Process process = createShizukuProcess(new String[]{"sh"});
             DataOutputStream os = new DataOutputStream(process.getOutputStream());
 
             os.writeBytes("mkdir -p \"" + targetDir + "\"\n");
