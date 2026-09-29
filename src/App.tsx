@@ -1,7 +1,15 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { HARDCODED_TARGET_PATH } from './where-to-copy';
 import targetPathRaw from './where-to-copy/target_path.txt?raw';
 import { vfs } from './utils/fileSystem';
+import {
+  checkShizukuStatus,
+  requestShizukuPermission,
+  openShizukuApp,
+  pasteFilesToDestination,
+  isNativeAndroid,
+  ShizukuStatus,
+} from './services/shizuku';
 import {
   Zap,
   Check,
@@ -11,9 +19,11 @@ import {
   Lock,
   Unlock,
   ShieldCheck,
-  CheckCircle2,
-  ExternalLink,
   LogOut,
+  FolderSync,
+  ExternalLink,
+  Smartphone,
+  Cpu,
 } from 'lucide-react';
 
 const KEY_URL =
@@ -34,9 +44,14 @@ export default function App() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [isInitialCheckDone, setIsInitialCheckDone] = useState<boolean>(false);
 
+  // Shizuku native states
+  const [shizuku, setShizuku] = useState<ShizukuStatus | null>(null);
+  const [isRequestingPerm, setIsRequestingPerm] = useState<boolean>(false);
+
   // Activation & status states
   const [status, setStatus] = useState<'idle' | 'pasting' | 'success' | 'error'>('idle');
   const [statusMessage, setStatusMessage] = useState<string>('');
+  const [pasteMethod, setPasteMethod] = useState<string>('');
 
   // Target path from where-to-copy
   const targetPath = (HARDCODED_TARGET_PATH || targetPathRaw || '').trim();
@@ -53,6 +68,19 @@ export default function App() {
     return list;
   };
 
+  const files = getAnshuFiles();
+
+  // Refresh Shizuku status
+  const refreshShizuku = useCallback(async () => {
+    try {
+      const s = await checkShizukuStatus();
+      setShizuku(s);
+      return s;
+    } catch {
+      return null;
+    }
+  }, []);
+
   // Check saved key on mount
   useEffect(() => {
     const savedKey = localStorage.getItem('cyber_engine_auth_key');
@@ -63,6 +91,42 @@ export default function App() {
       setIsInitialCheckDone(true);
     }
   }, []);
+
+  // Poll Shizuku status when authenticated
+  useEffect(() => {
+    if (isAuthenticated) {
+      refreshShizuku();
+      const interval = setInterval(refreshShizuku, 4000);
+      return () => clearInterval(interval);
+    }
+  }, [isAuthenticated, refreshShizuku]);
+
+  // Request Shizuku permission handler
+  const handleRequestShizuku = async () => {
+    setIsRequestingPerm(true);
+    try {
+      const res = await requestShizukuPermission();
+      await refreshShizuku();
+      if (!res.granted) {
+        setStatus('error');
+        setStatusMessage(res.message || 'Shizuku permission not granted by user.');
+      } else {
+        setStatus('idle');
+        setStatusMessage('');
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setStatus('error');
+      setStatusMessage(`Shizuku error: ${msg}`);
+    } finally {
+      setIsRequestingPerm(false);
+    }
+  };
+
+  // Launch Shizuku app
+  const handleOpenShizuku = async () => {
+    await openShizukuApp();
+  };
 
   // Fetch and verify key from GitHub repository
   const verifyKeyAgainstGithub = async (keyToTest: string, isSilent = false) => {
@@ -77,7 +141,6 @@ export default function App() {
     setAuthError(null);
 
     try {
-      // Cache-busting query to ensure freshest key from GitHub
       const res = await fetch(`${KEY_URL}?t=${Date.now()}`, {
         cache: 'no-store',
       });
@@ -87,7 +150,6 @@ export default function App() {
       }
 
       const remoteRaw = await res.text();
-      // Parse valid keys (supports single key, multi-line, or comma-separated)
       const validKeys = remoteRaw
         .split(/[\r\n,]+/)
         .map((k) => k.trim())
@@ -101,13 +163,14 @@ export default function App() {
         localStorage.setItem('cyber_engine_auth_key', trimmedInput);
         setIsAuthenticated(true);
         setAuthError(null);
+        // Refresh Shizuku immediately upon auth
+        setTimeout(() => refreshShizuku(), 100);
       } else {
         setIsAuthenticated(false);
         setAuthError('Access Denied: Invalid key. Please check key.txt on GitHub.');
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      // Fallback: If offline or rate-limited but matches previously verified key
       const savedKey = localStorage.getItem('cyber_engine_auth_key');
       if (savedKey && savedKey.toLowerCase() === trimmedInput.toLowerCase()) {
         setIsAuthenticated(true);
@@ -132,80 +195,95 @@ export default function App() {
   const handleActivate = async () => {
     if (status === 'pasting') return;
 
-    setStatus('pasting');
-    setStatusMessage('Connecting to Shizuku UID 2000 (shell)...');
-
-    const files = getAnshuFiles();
-
-    // Visual feedback delay
-    await new Promise((resolve) => setTimeout(resolve, 350));
-
     if (files.length === 0) {
       setStatus('error');
-      setStatusMessage(
-        'anshu-on-top folder is empty. Place your files in /src/anshu-on-top/ and click ACTIVATE.'
-      );
+      setStatusMessage('No files found in /src/anshu-on-top/. Please add files and try again.');
       return;
     }
 
-    try {
-      const cleanDest = targetPath.replace(/\/+$/, '');
+    const cleanDest = targetPath.replace(/\/+$/, '');
+    if (!cleanDest) {
+      setStatus('error');
+      setStatusMessage('Target directory path in /src/where-to-copy/ is empty.');
+      return;
+    }
 
-      // Ensure destination directory exists
-      const parts = cleanDest.split('/').filter(Boolean);
-      let curr = '';
-      for (const seg of parts) {
-        const parent = curr || '/';
-        curr = `${curr}/${seg}`;
-        if (!vfs.getItem(curr)) {
-          try {
-            vfs.createDirectory(parent, seg);
-          } catch {
-            // Already exists
-          }
+    // On Android: check Shizuku status
+    const currentStatus = await refreshShizuku();
+    if (currentStatus?.isAndroid) {
+      // If Shizuku is running but permission not granted, request it first
+      if (currentStatus.shizukuAvailable && !currentStatus.shizukuPermission) {
+        setStatus('pasting');
+        setStatusMessage('Requesting Shizuku authorization dialog...');
+        const req = await requestShizukuPermission();
+        if (!req.granted) {
+          setStatus('error');
+          setStatusMessage('Shizuku permission was rejected. Please allow CYBER ENGINE in the Shizuku prompt.');
+          return;
         }
+      } else if (!currentStatus.shizukuAvailable && !currentStatus.rootAvailable) {
+        // If Shizuku is not running and no root
+        setStatus('error');
+        setStatusMessage('Shizuku service is not running. Tap "OPEN SHIZUKU" below to start it.');
+        return;
+      }
+    }
+
+    setStatus('pasting');
+    setStatusMessage('Pasting files into target directory...');
+
+    try {
+      // 1. Execute native paste via Shizuku / Root / Direct
+      const payload = files.map((f) => ({
+        name: f.relPath,
+        content: f.content,
+        isBase64: false,
+      }));
+
+      const pasteRes = await pasteFilesToDestination(cleanDest, payload);
+
+      if (!pasteRes.success) {
+        throw new Error(pasteRes.message || 'Paste operation failed.');
       }
 
-      // Copy all files from anshu-on-top into destination
-      for (const file of files) {
-        const fullDestPath = `${cleanDest}/${file.relPath}`;
-        const parentDir = vfs.getParentPath(fullDestPath);
-
-        // Ensure subdirectories exist if any
-        if (parentDir && !vfs.getItem(parentDir)) {
-          const subparts = parentDir.split('/').filter(Boolean);
-          let subCurr = '';
-          for (const s of subparts) {
-            const p = subCurr || '/';
-            subCurr = `${subCurr}/${s}`;
-            if (!vfs.getItem(subCurr)) {
-              try {
-                vfs.createDirectory(p, s);
-              } catch {
-                // ignore
-              }
+      // 2. Also sync to web VFS
+      try {
+        const parts = cleanDest.split('/').filter(Boolean);
+        let curr = '';
+        for (const seg of parts) {
+          const parent = curr || '/';
+          curr = `${curr}/${seg}`;
+          if (!vfs.getItem(curr)) {
+            try {
+              vfs.createDirectory(parent, seg);
+            } catch {
+              // ignore
             }
           }
         }
 
-        // Delete existing file if present
-        if (vfs.getItem(fullDestPath)) {
-          vfs.deleteItem(fullDestPath);
+        for (const file of files) {
+          const fullDestPath = `${cleanDest}/${file.relPath}`;
+          const parentDir = vfs.getParentPath(fullDestPath);
+          if (vfs.getItem(fullDestPath)) {
+            vfs.deleteItem(fullDestPath);
+          }
+          const size = new Blob([file.content]).size;
+          vfs.createFile(parentDir, file.relPath.split('/').pop() || 'file', file.content, size);
         }
-
-        const size = new Blob([file.content]).size;
-        vfs.createFile(parentDir, file.relPath.split('/').pop() || 'file', file.content, size);
+      } catch {
+        // VFS error non-fatal
       }
 
-      // Apply chmod 775
-      vfs.chmodItem(cleanDest, '-rwxrwxr-x');
-
+      setPasteMethod(pasteRes.method);
       setStatus('success');
-      setStatusMessage(`Pasted ${files.length} file${files.length > 1 ? 's' : ''} to ${cleanDest}`);
+      setStatusMessage(
+        `Pasted ${files.length} file${files.length > 1 ? 's' : ''} to destination!`
+      );
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       setStatus('error');
-      setStatusMessage(`Error: ${msg}`);
+      setStatusMessage(msg);
     }
   };
 
@@ -306,26 +384,120 @@ export default function App() {
     );
   }
 
-  // SCREEN 2: AUTHORIZED - ONE CLEAN ACTIVATE BUTTON
-  return (
-    <div className="min-h-screen bg-[#06090e] text-slate-100 flex flex-col items-center justify-center p-4 selection:bg-emerald-500/20 relative">
-      {/* Top right session status & logout */}
-      <div className="absolute top-4 right-4 flex items-center gap-2">
-        <span className="hidden sm:inline-flex items-center gap-1 text-[11px] font-mono text-emerald-400 bg-emerald-950/30 border border-emerald-500/20 px-2.5 py-1 rounded-lg">
-          <ShieldCheck className="w-3.5 h-3.5" />
-          <span>Authorized: {authKeyInput.toUpperCase()}</span>
-        </span>
-        <button
-          onClick={handleLogout}
-          title="Lock / Logout"
-          className="p-2 text-slate-400 hover:text-rose-400 bg-slate-900 border border-slate-800 rounded-lg transition-colors"
-        >
-          <LogOut className="w-3.5 h-3.5" />
-        </button>
-      </div>
+  // SCREEN 2: AUTHORIZED MAIN DASHBOARD
+  const isShizukuReady = shizuku?.shizukuPermission;
+  const isShizukuAvailableNoPerm = shizuku?.shizukuAvailable && !shizuku?.shizukuPermission;
+  const isShizukuOffline = shizuku?.isAndroid && !shizuku?.shizukuAvailable && !shizuku?.rootAvailable;
 
-      <div className="flex flex-col items-center gap-6 max-w-sm w-full text-center">
-        {/* ONE BIG ACTIVATE BUTTON */}
+  return (
+    <div className="min-h-screen bg-[#06090e] text-slate-100 flex flex-col items-center justify-between p-4 selection:bg-emerald-500/20 relative">
+      {/* Top Header & Shizuku Status Bar */}
+      <header className="w-full max-w-md pt-2 flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+              <Cpu className="w-4 h-4" />
+            </div>
+            <div>
+              <h2 className="font-['Cabinet_Grotesk'] font-bold text-sm text-white tracking-wide">
+                CYBER ENGINE V2
+              </h2>
+              <p className="text-[10px] font-mono text-slate-400">
+                Authorized: <span className="text-emerald-400 font-bold">{authKeyInput.toUpperCase()}</span>
+              </p>
+            </div>
+          </div>
+
+          <button
+            onClick={handleLogout}
+            title="Lock / Logout"
+            className="p-2 text-slate-400 hover:text-rose-400 bg-slate-900 border border-slate-800 rounded-lg transition-colors flex items-center gap-1.5 text-xs font-mono"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Lock</span>
+          </button>
+        </div>
+
+        {/* Shizuku Status Badge / Bar */}
+        <div className="bg-slate-900/80 border border-slate-800/80 rounded-xl p-3 flex flex-col gap-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-mono text-slate-400 flex items-center gap-1.5">
+              <Smartphone className="w-3.5 h-3.5 text-slate-500" />
+              <span>SUBSYSTEM:</span>
+            </span>
+
+            {isShizukuReady && (
+              <span className="inline-flex items-center gap-1.5 text-[11px] font-mono text-emerald-400 bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded-full font-semibold">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                SHIZUKU ACTIVE (UID {shizuku?.shizukuUid ?? 2000})
+              </span>
+            )}
+
+            {isShizukuAvailableNoPerm && (
+              <button
+                onClick={handleRequestShizuku}
+                disabled={isRequestingPerm}
+                className="inline-flex items-center gap-1.5 text-[11px] font-mono text-amber-300 bg-amber-950/60 border border-amber-500/40 px-2.5 py-0.5 rounded-full font-semibold hover:bg-amber-900/60 transition-colors animate-pulse"
+              >
+                <span>GRANT SHIZUKU PERMISSION</span>
+              </button>
+            )}
+
+            {shizuku?.rootAvailable && !shizuku?.shizukuAvailable && (
+              <span className="inline-flex items-center gap-1.5 text-[11px] font-mono text-purple-300 bg-purple-950/60 border border-purple-500/30 px-2 py-0.5 rounded-full font-semibold">
+                <span className="w-2 h-2 rounded-full bg-purple-400" />
+                ROOT (SU) ACTIVE
+              </span>
+            )}
+
+            {isShizukuOffline && (
+              <button
+                onClick={handleOpenShizuku}
+                className="inline-flex items-center gap-1.5 text-[11px] font-mono text-rose-400 bg-rose-950/60 border border-rose-500/30 px-2 py-0.5 rounded-full font-semibold hover:bg-rose-900/60 transition-colors"
+              >
+                <AlertCircle className="w-3 h-3" />
+                <span>START SHIZUKU</span>
+              </button>
+            )}
+
+            {!shizuku?.isAndroid && (
+              <span className="inline-flex items-center gap-1.5 text-[11px] font-mono text-cyan-400 bg-cyan-950/40 border border-cyan-500/30 px-2 py-0.5 rounded-full font-semibold">
+                <span className="w-2 h-2 rounded-full bg-cyan-400" />
+                WEB PREVIEW
+              </span>
+            )}
+          </div>
+
+          {/* Action prompt if Shizuku needs attention */}
+          {isShizukuAvailableNoPerm && (
+            <div className="text-[11px] font-mono text-amber-400 bg-amber-950/30 border border-amber-500/20 p-2 rounded-lg flex items-center justify-between">
+              <span>Shizuku is running. Tap button to authorize CYBER ENGINE:</span>
+              <button
+                onClick={handleRequestShizuku}
+                className="px-2 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded font-bold uppercase text-[10px]"
+              >
+                Authorize
+              </button>
+            </div>
+          )}
+
+          {isShizukuOffline && (
+            <div className="text-[11px] font-mono text-rose-400 bg-rose-950/30 border border-rose-500/20 p-2 rounded-lg flex items-center justify-between">
+              <span>Shizuku service is not running on Android:</span>
+              <button
+                onClick={handleOpenShizuku}
+                className="px-2 py-1 bg-rose-500 hover:bg-rose-400 text-slate-950 rounded font-bold uppercase text-[10px] inline-flex items-center gap-1"
+              >
+                <span>Open Shizuku</span>
+                <ExternalLink className="w-3 h-3" />
+              </button>
+            </div>
+          )}
+        </div>
+      </header>
+
+      {/* Center: BIG ACTIVATE BUTTON */}
+      <main className="flex flex-col items-center gap-6 max-w-sm w-full text-center my-auto py-6">
         <button
           onClick={handleActivate}
           disabled={status === 'pasting'}
@@ -356,28 +528,63 @@ export default function App() {
         </button>
 
         {/* Clean status feedback below button */}
-        <div className="min-h-[40px] flex items-center justify-center text-center px-4">
+        <div className="min-h-[44px] flex items-center justify-center text-center px-4 w-full">
           {status === 'pasting' && (
-            <span className="text-xs font-mono text-emerald-400 animate-pulse">
-              Executing Shizuku paste via UID 2000...
+            <span className="text-xs font-mono text-emerald-400 animate-pulse flex items-center gap-1.5">
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              <span>{statusMessage || 'Executing Shizuku paste...'}</span>
             </span>
           )}
 
           {status === 'success' && (
-            <div className="flex items-center gap-1.5 text-xs font-mono text-emerald-400 bg-emerald-950/40 px-3 py-1.5 rounded-lg border border-emerald-500/30">
-              <Check className="w-3.5 h-3.5 text-emerald-400" />
-              <span>{statusMessage}</span>
+            <div className="flex flex-col items-center gap-1">
+              <div className="flex items-center gap-1.5 text-xs font-mono text-emerald-400 bg-emerald-950/60 px-3 py-1.5 rounded-lg border border-emerald-500/30">
+                <Check className="w-3.5 h-3.5 text-emerald-400" />
+                <span>{statusMessage}</span>
+              </div>
+              {pasteMethod && (
+                <span className="text-[10px] font-mono text-slate-500">
+                  METHOD: {pasteMethod.toUpperCase()} PRIVILEGES
+                </span>
+              )}
             </div>
           )}
 
           {status === 'error' && (
-            <div className="flex items-center gap-1.5 text-xs font-mono text-amber-400 bg-amber-950/40 px-3 py-1.5 rounded-lg border border-amber-500/30">
-              <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-              <span>{statusMessage}</span>
+            <div className="flex flex-col items-center gap-2">
+              <div className="flex items-center gap-1.5 text-xs font-mono text-rose-300 bg-rose-950/60 px-3 py-1.5 rounded-lg border border-rose-500/40 text-left">
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                <span>{statusMessage}</span>
+              </div>
+              {isShizukuOffline && (
+                <button
+                  onClick={handleOpenShizuku}
+                  className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-mono rounded-md border border-slate-700 transition-colors inline-flex items-center gap-1.5"
+                >
+                  <ExternalLink className="w-3 h-3 text-slate-400" />
+                  <span>Launch Shizuku App</span>
+                </button>
+              )}
             </div>
           )}
         </div>
-      </div>
+      </main>
+
+      {/* Bottom Target Destination Info */}
+      <footer className="w-full max-w-md pb-2">
+        <div className="bg-slate-950/80 border border-slate-900 rounded-xl p-3 flex flex-col gap-1.5 text-left">
+          <div className="flex items-center justify-between text-[11px] font-mono text-slate-500">
+            <span className="flex items-center gap-1">
+              <FolderSync className="w-3.5 h-3.5 text-emerald-500" />
+              <span>TARGET DESTINATION</span>
+            </span>
+            <span>{files.length} file{files.length !== 1 ? 's' : ''} ready</span>
+          </div>
+          <p className="text-[11px] font-mono text-slate-400 truncate bg-slate-900/90 px-2 py-1 rounded border border-slate-800" title={targetPath}>
+            {targetPath || 'Path not specified'}
+          </p>
+        </div>
+      </footer>
     </div>
   );
 }
