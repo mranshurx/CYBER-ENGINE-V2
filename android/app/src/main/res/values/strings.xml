@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Cyber Engine V2</string>
+    <string name="title_activity_main">Cyber Engine V2</string>
+    <string name="package_name">com.cyberengine.app</string>
+    <string name="custom_url_scheme">com.cyberengine.app</string>
+</resources>
